@@ -350,8 +350,7 @@ func logit(handler http.Handler) http.Handler {
 		// health, for example).
 		skipLog := r.Method == "GET" &&
 			(strings.HasPrefix(r.URL.Path, "/v1/changes/") && strings.Count(r.URL.Path, "/") == 3 ||
-				r.URL.Path == "/v1/system-info" ||
-				r.URL.Path == "/v1/health")
+				r.URL.Path == "/v1/system-info")
 		if !skipLog {
 			if strings.HasSuffix(r.RemoteAddr, ";") {
 				logger.Debugf("%s %s %s %s %d", r.RemoteAddr, r.Method, r.URL, t, ww.status())
