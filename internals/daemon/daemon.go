@@ -81,22 +81,20 @@ type Options struct {
 
 // A Daemon listens for requests and routes them to the right command
 type Daemon struct {
-	Version             string
-	StartTime           time.Time
-	pebbleDir           string
-	normalSocketPath    string
-	untrustedSocketPath string
-	httpAddress         string
-	overlord            *overlord.Overlord
-	state               *state.State
-	generalListener     net.Listener
-	untrustedListener   net.Listener
-	httpListener        net.Listener
-	connTracker         *connTracker
-	serve               *http.Server
-	tomb                tomb.Tomb
-	router              *mux.Router
-	standbyOpinions     *standby.StandbyOpinions
+	Version          string
+	StartTime        time.Time
+	pebbleDir        string
+	normalSocketPath string
+	httpAddress      string
+	overlord         *overlord.Overlord
+	state            *state.State
+	generalListener  net.Listener
+	httpListener     net.Listener
+	connTracker      *connTracker
+	serve            *http.Server
+	tomb             tomb.Tomb
+	router           *mux.Router
+	standbyOpinions  *standby.StandbyOpinions
 
 	// set to what kind of restart was requested (if any)
 	requestedRestart restart.RestartType
@@ -123,14 +121,13 @@ type Command struct {
 	Path       string
 	PathPrefix string
 	//
-	GET         ResponseFunc
-	PUT         ResponseFunc
-	POST        ResponseFunc
-	DELETE      ResponseFunc
-	GuestOK     bool
-	UserOK      bool
-	UntrustedOK bool
-	AdminOnly   bool
+	GET       ResponseFunc
+	PUT       ResponseFunc
+	POST      ResponseFunc
+	DELETE    ResponseFunc
+	GuestOK   bool
+	UserOK    bool
+	AdminOnly bool
 
 	d *Daemon
 }
@@ -153,9 +150,8 @@ const (
 // - GuestOK: anyone can access GET
 // - UserOK: any uid on the local system can access GET
 // - AdminOnly: only the administrator can access this
-// - UntrustedOK: can access this via the untrusted socket
 func (c *Command) canAccess(r *http.Request, user *UserState) accessResult {
-	if c.AdminOnly && (c.UserOK || c.GuestOK || c.UntrustedOK) {
+	if c.AdminOnly && (c.UserOK || c.GuestOK) {
 		logger.Panicf("internal error: command cannot have AdminOnly together with any *OK flag")
 	}
 
@@ -166,24 +162,12 @@ func (c *Command) canAccess(r *http.Request, user *UserState) accessResult {
 
 	// isUser means we have a UID for the request
 	isUser := false
-	pid, uid, socket, err := ucrednetGet(r.RemoteAddr)
+	ucred, err := ucrednetGet(r.RemoteAddr)
 	if err == nil {
 		isUser = true
 	} else if err != errNoID {
 		logger.Noticef("Cannot parse UID from remote address %q: %s", r.RemoteAddr, err)
 		return accessForbidden
-	}
-
-	isUntrusted := (socket == c.d.untrustedSocketPath)
-
-	_ = pid
-	_ = uid
-
-	if isUntrusted {
-		if c.UntrustedOK {
-			return accessOK
-		}
-		return accessUnauthorized
 	}
 
 	// the !AdminOnly check is redundant, but belt-and-suspenders
@@ -203,7 +187,7 @@ func (c *Command) canAccess(r *http.Request, user *UserState) accessResult {
 		return accessUnauthorized
 	}
 
-	if uid == 0 || sys.UserID(uid) == sysGetuid() {
+	if ucred.Uid == 0 || sys.UserID(ucred.Uid) == sysGetuid() {
 		// Superuser and process owner can do anything.
 		return accessOK
 	}
@@ -228,18 +212,15 @@ func (c *Command) Daemon() *Daemon {
 }
 
 func (c *Command) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	st := c.d.state
-	st.Lock()
-	user, err := userFromRequest(st, r)
+	user, err := userFromRequest(nil, r) // don't pass state as this does nothing right now
 	if err != nil {
-		statusForbidden("forbidden").ServeHTTP(w, r)
+		Forbidden("forbidden").ServeHTTP(w, r)
 		return
 	}
-	st.Unlock()
 
 	// check if we are in degradedMode
 	if c.d.degradedErr != nil && r.Method != "GET" {
-		statusInternalError(c.d.degradedErr.Error()).ServeHTTP(w, r)
+		InternalError(c.d.degradedErr.Error()).ServeHTTP(w, r)
 		return
 	}
 
@@ -247,15 +228,15 @@ func (c *Command) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case accessOK:
 		// nothing
 	case accessUnauthorized:
-		statusUnauthorized("access denied").ServeHTTP(w, r)
+		Unauthorized("access denied").ServeHTTP(w, r)
 		return
 	case accessForbidden:
-		statusForbidden("forbidden").ServeHTTP(w, r)
+		Forbidden("forbidden").ServeHTTP(w, r)
 		return
 	}
 
 	var rspf ResponseFunc
-	var rsp = statusMethodNotAllowed("method %q not allowed", r.Method)
+	var rsp = MethodNotAllowed("method %q not allowed", r.Method)
 
 	switch r.Method {
 	case "GET":
@@ -275,7 +256,6 @@ func (c *Command) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if rsp, ok := rsp.(*resp); ok {
 		st := c.d.state
-		logger.Noticef("daemon.go ServerHTTP from %s request state Lock: %s", r.RemoteAddr, time.Since(start_ts))
 		st.Lock()
 		logger.Noticef("daemon.go ServerHTTP from %s acquired state Lock: %s", r.RemoteAddr, time.Since(start_ts))
 		_, rst := restart.Pending(st)
@@ -389,14 +369,6 @@ func (d *Daemon) Init() error {
 		return fmt.Errorf("when trying to listen on %s: %v", d.normalSocketPath, err)
 	}
 
-	if listener, err := getListener(d.untrustedSocketPath, listenerMap); err == nil {
-		// This listener may also be nil if that socket wasn't among
-		// the listeners, so check it before using it.
-		d.untrustedListener = &ucrednetListener{Listener: listener}
-	} else {
-		logger.Debugf("cannot get listener for %q: %v", d.untrustedSocketPath, err)
-	}
-
 	d.addRoutes()
 
 	if d.httpAddress != "" {
@@ -440,7 +412,7 @@ func (d *Daemon) addRoutes() {
 
 	// also maybe add a /favicon.ico handler...
 
-	d.router.NotFoundHandler = statusNotFound("invalid API endpoint requested")
+	d.router.NotFoundHandler = NotFound("invalid API endpoint requested")
 }
 
 type connTracker struct {
@@ -509,14 +481,6 @@ func (d *Daemon) Start() error {
 	d.overlord.Loop()
 
 	d.tomb.Go(func() error {
-		if d.untrustedListener != nil {
-			d.tomb.Go(func() error {
-				if err := d.serve.Serve(d.untrustedListener); err != http.ErrServerClosed && d.tomb.Err() == tomb.ErrStillAlive {
-					return err
-				}
-				return nil
-			})
-		}
 		if err := d.serve.Serve(d.generalListener); err != http.ErrServerClosed && d.tomb.Err() == tomb.ErrStillAlive {
 			return err
 		}
@@ -873,10 +837,9 @@ func (d *Daemon) SetServiceArgs(serviceArgs map[string][]string) error {
 
 func New(opts *Options) (*Daemon, error) {
 	d := &Daemon{
-		pebbleDir:           opts.Dir,
-		normalSocketPath:    opts.SocketPath,
-		untrustedSocketPath: opts.SocketPath + ".untrusted",
-		httpAddress:         opts.HTTPAddress,
+		pebbleDir:        opts.Dir,
+		normalSocketPath: opts.SocketPath,
+		httpAddress:      opts.HTTPAddress,
 	}
 
 	ovldOptions := overlord.Options{
