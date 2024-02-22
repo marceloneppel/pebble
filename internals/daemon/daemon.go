@@ -271,11 +271,17 @@ func (c *Command) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if rspf != nil {
 		rsp = rspf(c, r, user)
 	}
+	logger.Noticef("daemon.go ServerHTTP from %s rspf built: %s", r.RemoteAddr, time.Since(start_ts))
 
 	if rsp, ok := rsp.(*resp); ok {
+		st := c.d.state
+		logger.Noticef("daemon.go ServerHTTP from %s request state Lock: %s", r.RemoteAddr, time.Since(start_ts))
 		st.Lock()
+		logger.Noticef("daemon.go ServerHTTP from %s acquired state Lock: %s", r.RemoteAddr, time.Since(start_ts))
 		_, rst := restart.Pending(st)
+		logger.Noticef("daemon.go ServerHTTP from %s restart pending executed: %s", r.RemoteAddr, time.Since(start_ts))
 		st.Unlock()
+		logger.Noticef("daemon.go ServerHTTP from %s state Lock released: %s", r.RemoteAddr, time.Since(start_ts))
 		switch rst {
 		case restart.RestartSystem:
 			rsp.transmitMaintenance(errorKindSystemRestart, "system is restarting")
@@ -284,15 +290,25 @@ func (c *Command) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case restart.RestartSocket:
 			rsp.transmitMaintenance(errorKindDaemonRestart, "daemon is stopping to wait for socket activation")
 		}
+		logger.Noticef("daemon.go ServerHTTP from %s transmitMaintenance finished: %s", r.RemoteAddr, time.Since(start_ts))
 		if rsp.Type != ResponseTypeError {
+			logger.Noticef("daemon.go ServerHTTP from %s start rsp.Type if: %s", r.RemoteAddr, time.Since(start_ts))
 			st.Lock()
+			logger.Noticef("daemon.go ServerHTTP from %s start rsp.Type if acquired state Lock: %s", r.RemoteAddr, time.Since(start_ts))
 			count, stamp := st.WarningsSummary()
+			logger.Noticef("daemon.go ServerHTTP from %s start rsp.Type if warningsSummary finished: %s", r.RemoteAddr, time.Since(start_ts))
 			st.Unlock()
+			logger.Noticef("daemon.go ServerHTTP from %s start rsp.Type if unlocked state: %s", r.RemoteAddr, time.Since(start_ts))
 			rsp.addWarningsToMeta(count, stamp)
+			logger.Noticef("daemon.go ServerHTTP from %s start rsp.Type if addWarningsToMeta finished: %s", r.RemoteAddr, time.Since(start_ts))
 		}
 	}
+	logger.Noticef("daemon.go ServerHTTP from %s ended rsp logic: %s", r.RemoteAddr, time.Since(start_ts))
 
+	logger.Noticef("daemon.go ServerHTTP from %s final ServeHTTP: %s", r.RemoteAddr, time.Since(start_ts))
 	rsp.ServeHTTP(w, r)
+	logger.Noticef("daemon.go ServerHTTP from %s final ServeHTTP finished: %s", r.RemoteAddr, time.Since(start_ts))
+	logger.Noticef("daemon.go ServerHTTP ended: %s", time.Now().String())
 }
 
 type wrappedWriter struct {
